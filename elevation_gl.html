@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no" />
+<title>Mapbox Flow</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+<link rel="stylesheet" href="https://api.mapbox.com/mapbox-gl-js/v2.0.1/mapbox-gl.css" />
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src='https://npmcdn.com/@turf/turf/turf.min.js'></script>
+<script src="https://api.mapbox.com/mapbox-gl-js/v2.0.1/mapbox-gl.js"></script>
+<script src="./js/leaflet-tilelayer-colorpicker.js"></script>
+
+</head>
+<style>
+#map, #mapGl {
+    position:absolute;
+    top:0;
+    left:0;
+    right:0;
+    bottom:0;
+}
+</style>
+<body>
+
+<div id="map" style="visibility:hidden"></div>
+<div id="mapGl"></div>
+
+<script>
+let initLoad = true;
+const MAPBOX_PUBLIC_ACCESS_TOKEN = "pk.eyJ1Ijoid2lsbGlhbS1kYXZpcyIsImEiOiJja2tiYWtvbWcwMmtzMnBvajh3M2kxZGRuIn0.GeROaHKn2Gbvsg1e8buJEw";
+const MAPBOX_TERRAIN_RGB = "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.pngraw?access_token=" + MAPBOX_PUBLIC_ACCESS_TOKEN;
+const colorpicker = L.tileLayer.colorPicker(MAPBOX_TERRAIN_RGB);
+const initCenter = {
+    lat: 36.15,
+    lng: -112.02
+}
+
+let clickNum = 0;
+let clickArray = [];
+let allCircles = [];
+let animationLayer;
+
+mapboxgl.accessToken = MAPBOX_PUBLIC_ACCESS_TOKEN;
+const mapGl = new mapboxgl.Map({
+    container: 'mapGl',
+    style: 'mapbox://styles/mapbox/satellite-v9',
+    center: [initCenter.lng, initCenter.lat],
+    pitch: 20,
+    bearing: 0,
+    zoom: 14
+});
+
+const map = L.map("map", L.extend({
+    minZoom: 0,
+    maxZoom: 18,
+    zoom: 13,
+    center: [initCenter.lat, initCenter.lng]
+}));
+
+mapGl.on('load', function () {
+    mapGl.addSource('mapbox-dem', {
+        'type': 'raster-dem',
+        'url': 'mapbox://mapbox.mapbox-terrain-dem-v1',
+        'tileSize': 512,
+        'maxzoom': 14
+    });
+    mapGl.setTerrain({ 'source': 'mapbox-dem', 'exaggeration': 1.1 });
+
+    colorpicker.addTo(map);
+});
+
+function animation() {
+    animationLayer = setInterval(generateLowest, 60);
+};
+
+let generateLowest = async () => {
+    return await getLowest(clickArray);
+};
+
+function stopAnimation() {
+    clearInterval(animationLayer);
+}
+
+mapGl.on("moveend", function(event) {
+    let center = mapGl.getCenter();
+    let zoom = mapGl.getZoom();
+    map.setView(new L.LatLng(center.lat, center.lng), parseInt(zoom));
+    stopAnimation();
+})
+
+mapGl.on("click", function(event) {
+    stopAnimation();
+    clickArray = [];
+
+    if (!clickArray.length) {
+        clickArray.push({
+            'id': clickNum,
+            'coords':[event.lngLat.lng, event.lngLat.lat],
+            'ele': null
+        });
+
+        animation();
+
+    }
+});
+
+function getLowest(event) {
+
+    let index = event[0].id;
+    let lng = event[0].coords[0];
+    let lat = event[0].coords[1];
+
+    let coords = [lng, lat];
+
+    let calc = 0.001;
+
+    let swcalcLng = lng - calc;
+    let swcalcLat = lat - calc;
+    let necalcLng = lng + calc;
+    let necalcLat = lat + calc;
+
+    let lowestCircle = turf.point(coords);
+    allCircles.push(lowestCircle);
+
+    let extent = [swcalcLng, swcalcLat, necalcLng, necalcLat];
+    let cellSide = 0.04;
+    let options = {units: 'kilometers'};
+
+    let grid = turf.pointGrid(extent, cellSide, options);
+
+    let elevationArray = [];
+    let centerPoint = getEle([lat, lng]);
+    let centerEle = parseInt(centerPoint);
+
+    for (let i = 0 ; i < grid.features.length;i++) {
+        let features = grid.features;
+
+        let newLat = features[i].geometry.coordinates[1];
+        let newLng = features[i].geometry.coordinates[0];
+
+        let elevationpoint = getEle([newLat, newLng]);
+        elevationArray.push({
+            'ele': parseInt(elevationpoint),
+            'coords': [newLng, newLat]
+        });
+
+        if (i === features.length-1) {
+            let lowestLocation = getNextLocation(elevationArray);
+            if (centerEle != lowestLocation.ele) {
+                let pointUpdate = clickArray[index];
+                pointUpdate.coords = [lowestLocation.coords[0],lowestLocation.coords[1]];
+                pointUpdate.ele = lowestLocation.ele;
+                buildLayers();
+            } else {
+                console.log('found bottom');
+                stopAnimation();
+            }
+            
+        }
+    };
+};
+
+function getEle(event) {
+    let a = colorpicker.getColor(event);
+    let h = NaN;
+    if (a !== null) {
+        h = -10000 + ((a[0] * 256 * 256 + a[1] * 256 + a[2]) * 0.1);
+        return h.toFixed(1);
+    }
+}
+
+function getNextLocation(elevationArray) {
+    let min = Math.min.apply(null, elevationArray.map(point => point.ele));
+    let found = elevationArray.find(point => point.ele === min);
+    return found;
+}
+
+function buildLayers() {
+    let collection = turf.featureCollection(allCircles);
+    if (initLoad) {
+        addLayers(collection);
+        initLoad = false;
+    } else {
+        mapGl.getSource('lowest').setData(collection);
+    }
+}
+
+function addLayers(layer) {
+
+    mapGl.addSource('lowest', {
+        type: 'geojson',
+        data: layer
+    });
+
+    mapGl.addLayer({
+        'id': 'lowest-circle',
+        'type': 'heatmap',
+        'source': 'lowest',
+        'paint': {
+            'heatmap-weight': 1,
+            'heatmap-intensity': 1,
+
+            // LAVA COLOR SCALE
+            // 'heatmap-color': [
+            //     'interpolate',
+            //     ['linear'],
+            //     ['heatmap-density'],
+            //         0,
+            //         'rgba(255, 247, 93, 0)',
+            //         0.2,
+            //         'rgba(255, 247, 93, 1)',
+            //         0.4,
+            //         'rgb(255, 193, 31)',
+            //         0.6,
+            //         'rgb(254, 101, 13)',
+            //         0.8,
+            //         'rgb(243, 60, 4)',
+            //         1,
+            //         'rgb(161, 1, 0)'
+            // ],
+
+            // WATER COLOR SCALE
+            'heatmap-color': [
+                'interpolate',
+                ['linear'],
+                ['heatmap-density'],
+                    0,
+                    'rgba(178, 212, 219, 0)',
+                    0.2,
+                    'rgba(178, 212, 219, 1)',
+                    0.6,
+                    'rgb(36, 68, 121)',
+                    1,
+                    'rgb(52, 76, 100)'
+            ],
+            'heatmap-radius': 50,
+            'heatmap-opacity': 0.65
+        }
+    });
+};
+
+</script>
+</body>
+</html>
